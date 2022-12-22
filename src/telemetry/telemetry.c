@@ -8,7 +8,6 @@
 #include <fmgr.h>
 #include <miscadmin.h>
 #include <commands/extension.h>
-#include <storage/ipc.h>
 #include <catalog/pg_collation.h>
 #include <utils/builtins.h>
 #include <utils/json.h>
@@ -235,7 +234,7 @@ ts_check_version_response(const char *json)
 	{
 		if (!ts_validate_server_version(json, &result))
 		{
-			elog(NOTICE, "server did not return a valid TimescaleDB version: %s", result.errhint);
+			elog(WARNING, "server did not return a valid TimescaleDB version: %s", result.errhint);
 			return;
 		}
 
@@ -998,41 +997,37 @@ ts_build_version_request(const char *host, const char *path)
 	return req;
 }
 
-static ConnectionType
-connection_type(const char *service)
-{
-	if (strcmp("http", service) == 0)
-		return CONNECTION_PLAIN;
-	else if (strcmp("https", service) == 0)
-		return CONNECTION_SSL;
-
-	ereport(NOTICE,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("scheme \"%s\" not supported for telemetry", service)));
-	return _CONNECTION_MAX;
-}
-
 Connection *
 ts_telemetry_connect(const char *host, const char *service)
 {
-	Connection *conn = ts_connection_create(connection_type(service));
+	Connection *conn = NULL;
+	int ret;
 
-	if (conn)
+	if (strcmp("http", service) == 0)
+		conn = ts_connection_create(CONNECTION_PLAIN);
+	else if (strcmp("https", service) == 0)
+		conn = ts_connection_create(CONNECTION_SSL);
+	else
+		ereport(WARNING,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("scheme \"%s\" not supported for telemetry", service)));
+
+	if (conn == NULL)
+		return NULL;
+
+	ret = ts_connection_connect(conn, host, service, 0);
+
+	if (ret < 0)
 	{
-		int ret = ts_connection_connect(conn, host, service, 0);
+		const char *errstr = ts_connection_get_and_clear_error(conn);
 
-		if (ret < 0)
-		{
-			const char *errstr = ts_connection_get_and_clear_error(conn);
+		ts_connection_destroy(conn);
+		conn = NULL;
 
-			ts_connection_destroy(conn);
-			conn = NULL;
-
-			ereport(NOTICE,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("telemetry could not connect to \"%s\"", host),
-					 errdetail("%s", errstr)));
-		}
+		ereport(WARNING,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("telemetry could not connect to \"%s\"", host),
+				 errdetail("%s", errstr)));
 	}
 
 	return conn;
@@ -1091,13 +1086,13 @@ ts_telemetry_main(const char *host, const char *path, const char *service)
 
 	if (err != HTTP_ERROR_NONE)
 	{
-		elog(NOTICE, "telemetry error: %s", ts_http_strerror(err));
+		elog(WARNING, "telemetry error: %s", ts_http_strerror(err));
 		goto cleanup;
 	}
 
 	if (!ts_http_response_state_valid_status(rsp))
 	{
-		elog(NOTICE,
+		elog(WARNING,
 			 "telemetry got unexpected HTTP response status: %d",
 			 ts_http_response_state_status_code(rsp));
 		goto cleanup;
@@ -1118,7 +1113,7 @@ ts_telemetry_main(const char *host, const char *path, const char *service)
 	{
 		/* If the response is malformed, ts_check_version_response() will
 		 * throw an error, so we capture the error here and print debugging
-		 * information. */
+		 * information before re-throwing the error. */
 		ereport(NOTICE,
 				(errmsg("malformed telemetry response body"),
 				 errdetail("host=%s, service=%s, path=%s: %s",
@@ -1126,12 +1121,7 @@ ts_telemetry_main(const char *host, const char *path, const char *service)
 						   service,
 						   path,
 						   json ? json : "<EMPTY>")));
-		/* Do not throw an error in this case, there is really nothing wrong
-		   with the system. It's only telemetry that is having problems, so we
-		   just wrap this up and exit. */
-		if (started)
-			AbortCurrentTransaction();
-		return false;
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
