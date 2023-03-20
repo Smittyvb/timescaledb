@@ -518,6 +518,7 @@ infer_gapfill_boundary(GapFillState *state, GapFillBoundary boundary)
 	int strategy;
 	Oid lefttype, righttype;
 	List *quals;
+	bool saw_non_simple = false;
 
 	int64 boundary_value = 0;
 	bool boundary_found = false;
@@ -567,14 +568,6 @@ infer_gapfill_boundary(GapFillState *state, GapFillBoundary boundary)
 		if (!op_in_opfamily(op, tce->btree_opf))
 			continue;
 
-		/*
-		 * only allow simple expressions because Params have not been set up
-		 * at this stage and Vars will not work either because we execute in
-		 * separate execution context
-		 */
-		if (!is_simple_expr(expr) || !var_equal(ts_var, var))
-			continue;
-
 		get_op_opfamily_properties(op, tce->btree_opf, false, &strategy, &lefttype, &righttype);
 
 		if (boundary == GAPFILL_START && strategy != BTGreaterStrategyNumber &&
@@ -583,6 +576,19 @@ infer_gapfill_boundary(GapFillState *state, GapFillBoundary boundary)
 		if (boundary == GAPFILL_END && strategy != BTLessStrategyNumber &&
 			strategy != BTLessEqualStrategyNumber)
 			continue;
+
+		/*
+		 * only allow simple expressions because Params have not been set up
+		 * at this stage and Vars will not work either because we execute in
+		 * separate execution context
+		 */
+		if (!var_equal(ts_var, var))
+			continue;
+		if (!is_simple_expr(expr))
+		{
+			saw_non_simple = true;
+			continue;
+		}
 
 		value = get_boundary_expr_value(state, boundary, expr);
 
@@ -616,7 +622,9 @@ infer_gapfill_boundary(GapFillState *state, GapFillBoundary boundary)
 
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("missing time_bucket_gapfill argument: could not infer %s from WHERE clause",
+			 errmsg(saw_non_simple ?
+			 			"missing time_bucket_gapfill argument: the %s in the WHERE clause is not a simple expression" :
+			 			"missing time_bucket_gapfill argument: could not infer %s from WHERE clause",
 					boundary == GAPFILL_START ? "start" : "finish"),
 			 errhint("Specify start and finish as arguments or in the WHERE clause.")));
 	pg_unreachable();

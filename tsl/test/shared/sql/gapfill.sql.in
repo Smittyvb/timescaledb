@@ -1116,6 +1116,20 @@ FROM (VALUES (1),(2)) v(t)
 WHERE t > t AND t < 2
 GROUP BY 1;
 
+-- complex WHERE clause expression
+SELECT
+  time_bucket_gapfill(1,t)
+FROM (VALUES (1),(2)) v(t)
+WHERE t > 1 AND t < (select 1)
+GROUP BY 1;
+
+-- complex WHERE clause expression
+SELECT
+  time_bucket_gapfill(1,t)
+FROM (VALUES (1),(2)) v(t)
+WHERE t > 1 AND t < (select 1)
+GROUP BY 1;
+ERROR:  missing time_bucket_gapfill argument: the finish in the WHERE clause is not a simple expression
 -- expression with cast
 SELECT
   time_bucket_gapfill(1,t1::int8)
